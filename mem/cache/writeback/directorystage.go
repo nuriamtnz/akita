@@ -93,9 +93,49 @@ func (ds *directoryStage) Reset() {
 	ds.cache.dirStageBuffer.Clear()
 }
 
+// NURIA PREFETCH IMPLEMENTATION
+func (ds *directoryStage) countPrefetchStats(trans *transaction) {
+	// Solo cuando es prefetch
+	if trans.read == nil || !trans.read.Prefetch {
+		return
+	}
+
+	pid := trans.read.PID
+	addr := trans.read.Address
+	blockSize := uint64(1 << ds.cache.log2BlockSize)
+	cacheLineID := addr / blockSize * blockSize
+
+	msgId := tracing.MsgIDAtReceiver(trans.read, ds.cache)
+
+	if ds.cache.directory.Lookup(pid, cacheLineID) != nil {
+		// Línea ya en L2
+		tracing.AddTaskStep(
+			msgId,
+			ds.cache,
+			"prefetch-req-hit-L2",
+		)
+	} else if ds.cache.mshr.Query(pid, cacheLineID) != nil {
+		// Línea en MSHR
+		tracing.AddTaskStep(
+			msgId,
+			ds.cache,
+			"prefetch-req-hit-mshr",
+		)
+	} else {
+		// Línea ni en L2 ni en MSHR
+		tracing.AddTaskStep(
+			msgId,
+			ds.cache,
+			"prefetch-req-miss",
+		)
+	}
+}
+
 func (ds *directoryStage) doRead(trans *transaction) bool {
 	cachelineID, _ := getCacheLineID(
 		trans.read.Address, ds.cache.log2BlockSize)
+
+	ds.countPrefetchStats(trans)
 
 	mshrEntry := ds.cache.mshr.Query(trans.read.PID, cachelineID)
 	if mshrEntry != nil {

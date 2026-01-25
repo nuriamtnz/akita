@@ -42,6 +42,9 @@ type transaction struct {
 	evictingDirtyMask []bool
 	evictionWriteReq  *mem.WriteReq
 	mshrEntry         *cache.MSHREntry
+
+	//PREFETCHING IMPLEMENTATION NURIA
+	//Prefetch bool // Indica si esta transacción es un prefetch
 }
 
 func (t transaction) accessReq() mem.AccessReq {

@@ -128,4 +128,5 @@ func (c *Comp) discardInflightTransactions() {
 	// }
 
 	c.inFlightTransactions = nil
+
 }

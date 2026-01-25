@@ -281,12 +281,22 @@ func (wb *writeBufferStage) processReturnRsp() bool {
 func (wb *writeBufferStage) processDataReadyRsp(
 	dataReady *mem.DataReadyRsp,
 ) bool {
+
 	trans := wb.findInflightFetchByFetchReadReqID(dataReady.RespondTo)
+
+	//PREFETCHING IMPLEMENTATION NURIA
+	//Verificar si es un prefetch
+	if trans.read != nil && trans.read.Prefetch {
+		// Prefetch: el dato se queda en L2, no se envía a L1
+		return wb.processPrefetchDataReady(trans, dataReady)
+	}
+
 	bankIndex := bankID(
 		trans.block,
 		wb.cache.directory.WayAssociativity(),
 		len(wb.cache.dirToBankBuffers),
 	)
+
 	bankBuf := wb.cache.writeBufferToBankBuffers[bankIndex]
 
 	if !bankBuf.CanPush() {
@@ -316,6 +326,64 @@ func (wb *writeBufferStage) processDataReadyRsp(
 	// 	trans.fetchedData,
 	// )
 
+	return true
+}
+
+// PREFETCHING IMPLEMENTATION NURIA
+// NUEVA FUNCIÓN: Manejar respuestas de prefetch
+func (wb *writeBufferStage) processPrefetchDataReady(
+	trans *transaction,
+	dataReady *mem.DataReadyRsp,
+) bool {
+	//El dato del prefetch se queda en L2
+	//No necesitamos propagarlo a L1
+	//Encontrar el banco
+	bankIndex := bankID(
+		trans.block,
+		wb.cache.directory.WayAssociativity(),
+		len(wb.cache.dirToBankBuffers),
+	)
+	bankBuf := wb.cache.writeBufferToBankBuffers[bankIndex]
+
+	//Esperar que el banco esté disponible
+	if !bankBuf.CanPush() {
+		return false
+	}
+
+	//Almacenar los datos
+	trans.fetchedData = dataReady.Data
+	trans.action = bankWriteFetched
+	trans.mshrEntry.Data = dataReady.Data
+
+	//Combinar datos si hay escrituras en el MSHR
+	wb.combineData(trans.mshrEntry)
+
+	//Limpiar MSHR
+	wb.cache.mshr.Remove(trans.mshrEntry.PID, trans.mshrEntry.Address)
+
+	//ENVIAR AL BANCO para que se almacene en L2
+	bankBuf.Push(trans)
+
+	block := trans.block
+
+	if block != nil && !block.IsPrefetched {
+		block.IsPrefetched = true
+		block.IsPrefetchedFirstUse = true
+
+	}
+
+	//Limpiar estructuras
+	// Remover de la lista de fetches pendientes
+	wb.removeInflightFetch(trans)
+	// Consumir el mensaje del puerto
+	wb.cache.bottomPort.RetrieveIncoming()
+
+	// Tracing para estadísticas
+	if trans.fetchReadReq != nil {
+		tracing.TraceReqFinalize(trans.fetchReadReq, wb.cache)
+	}
+
+	// El dato ya está disponible en L2 para futuras peticiones de L1
 	return true
 }
 
@@ -349,7 +417,7 @@ func (wb *writeBufferStage) findInflightFetchByFetchReadReqID(
 			return t
 		}
 	}
-
+	//return nil
 	panic("inflight read not found")
 }
 

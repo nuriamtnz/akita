@@ -28,6 +28,13 @@ func (p *topParser) Tick() bool {
 		id: sim.GetIDGenerator().Generate(),
 	}
 
+	//PREFETCHING IMPLEMENTATION NURIA
+	//detectar si es prefetch desde el ID del request
+	// reqID := req.Meta().ID
+	// if strings.HasSuffix(reqID, "_PREFETCH") {
+	// 	trans.Prefetch = true
+	// }
+
 	switch req := req.(type) {
 	case *mem.ReadReq:
 		trans.read = req

@@ -17,6 +17,10 @@ type Block struct {
 	ReadCount    int
 	IsLocked     bool
 	DirtyMask    []bool
+
+	//NURIA PREFETCH IMPLEMENTATION
+	IsPrefetched         bool // true si este bloque se trajo por prefetch
+	IsPrefetchedFirstUse bool // true hasta el primer hit tras su prefetch
 }
 
 // A Set is a list of blocks where a certain piece memory can be stored at

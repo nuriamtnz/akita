@@ -3,6 +3,7 @@ package writearound
 import (
 	"github.com/sarchlab/akita/v4/mem/cache"
 	"github.com/sarchlab/akita/v4/mem/mem"
+	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/pipelining"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/tracing"
@@ -287,6 +288,63 @@ func (d *directory) fetchFromBottom(
 	victim.IsLocked = true
 	d.cache.directory.Visit(victim)
 
+	switch d.cache.prefetchMode {
+	case PrefNone:
+		//No prefetching
+	default:
+		//BASIC PREFETCHING IMPLEMENTATION NURIA
+		stride := d.cache.prefetchStrideBlocks
+		if stride == 0 {
+			stride = 1
+		}
+		numLines := d.cache.prefetchNumLines
+		if numLines == 0 {
+			numLines = 1
+		}
+
+		finish := true
+		for i := uint64(1); i <= numLines; i++ {
+			addr := cacheLineID + i*stride*blockSize
+			success := d.trySendPrefetch(pid, addr, blockSize, trans)
+			if !success {
+				finish = false
+				break
+			}
+		}
+		return finish
+
+	}
+
+	return true
+}
+
+// HELPER PREFETCHING IMPLEMENTATION NURIA
+func (d *directory) trySendPrefetch(pid vm.PID, addr, blockSize uint64, trans *transaction) bool {
+	//VALIDAR que la dirección es válida
+	cacheLineID := addr / blockSize * blockSize
+
+	if d.cache.directory.Lookup(pid, cacheLineID) != nil {
+		return false
+	}
+	if d.cache.mshr.Query(pid, cacheLineID) != nil {
+		return false
+	}
+	dst := d.cache.addressToPortMapper.Find(cacheLineID)
+	prefetch := mem.ReadReqBuilder{}.
+		WithSrc(d.cache.bottomPort.AsRemote()).
+		WithDst(dst).
+		WithAddress(cacheLineID).
+		WithPID(pid).
+		WithByteSize(blockSize).
+		WithPrefetch().
+		Build()
+
+	err := d.cache.bottomPort.Send(prefetch)
+	if err == nil {
+		return false
+	}
+
+	tracing.TraceReqInitiate(prefetch, d.cache, trans.id+"_prefetch")
 	return true
 }
 

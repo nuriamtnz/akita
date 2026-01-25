@@ -227,6 +227,28 @@ func (s *bankStage) finalizeTrans() bool {
 }
 
 func (s *bankStage) finalizeReadHit(trans *transaction) bool {
+	//IMPLEMENTATION PREFETCH NURIA
+	block := trans.block
+	if block != nil && block.IsPrefetched {
+		msgId := tracing.MsgIDAtReceiver(trans.read, s.cache)
+
+		// Hit en bloque prefetched
+		tracing.AddTaskStep(
+			msgId,
+			s.cache,
+			"prefetch-hit",
+		)
+		if block.IsPrefetchedFirstUse {
+			tracing.AddTaskStep(
+				msgId,
+				s.cache,
+				"prefetch-first-hit",
+			)
+			block.IsPrefetchedFirstUse = false
+		}
+	}
+	//---
+
 	if !s.cache.topPort.CanSend() {
 		return false
 	}
@@ -234,7 +256,6 @@ func (s *bankStage) finalizeReadHit(trans *transaction) bool {
 	read := trans.read
 	addr := read.Address
 	_, offset := getCacheLineID(addr, s.cache.log2BlockSize)
-	block := trans.block
 
 	data, err := s.cache.storage.Read(
 		block.CacheAddress+offset, read.AccessByteSize)

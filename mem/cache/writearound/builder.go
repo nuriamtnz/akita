@@ -1,7 +1,9 @@
 package writearound
 
 import (
+	"flag"
 	"fmt"
+	"log"
 
 	"github.com/sarchlab/akita/v4/mem/cache"
 	"github.com/sarchlab/akita/v4/mem/mem"
@@ -9,6 +11,20 @@ import (
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/tracing"
 )
+
+// PREFETCH IMPLEMETATION NURIA
+var (
+	//flag de tipo cadena llamado "prefetch.mode" con valor por defecto "none"
+	flagPrefetchMode = flag.String("prefetch.mode", "next", "none|next|two|far|loop")
+	//flag de tipo uint64 llamado "prefetch.farstride" con valor por defecto 1024
+	flagFarStride = flag.Uint64("prefetch.farstride", 0, "stride en bloques para far jump")
+	flagNumLines  = flag.Uint64("prefetch.NumLines", 0, "numero de bloques consecutivos que traer")
+)
+var GlobalDataSize uint64 = 0
+
+func SetDataSize(size uint64) {
+	GlobalDataSize = size
+}
 
 // A Builder can build an writearound cache
 type Builder struct {
@@ -26,8 +42,8 @@ type Builder struct {
 	addressToPortMapper   mem.AddressToPortMapper
 	visTracer             tracing.Tracer
 
-	addressMapperType     string
-	remotePorts           []sim.RemotePort
+	addressMapperType string
+	remotePorts       []sim.RemotePort
 }
 
 // MakeBuilder creates a builder with default parameter setting
@@ -144,6 +160,45 @@ func (b Builder) WithRemotePorts(ports ...sim.RemotePort) Builder {
 	return b
 }
 
+// PREFETCH IMPLEMETATION NURIA
+// Toma la cadena pasada por el flag y la convierte al tipo PrefetchMode que se usa en caché.
+func parsePrefetchMode(s string) PrefetchMode {
+	switch s {
+	case "none":
+		return PrefNone
+	case "next":
+		return PrefNextLine
+	case "two":
+		return PrefTwoNextLines
+	case "far":
+		return PrefFarJump
+	case "loop":
+		return PrefLoop
+	default:
+		log.Fatalf("ERROR: Unknown prefetch mode '%s'\n", s)
+		log.Fatalf("   Valid modes: none, next, two, far, loop\n")
+		return PrefNone
+	}
+}
+
+// getPrefetchModeString convierte enum a string (helper)
+func getPrefetchModeString(mode PrefetchMode) string {
+	switch mode {
+	case PrefNone:
+		return "none"
+	case PrefNextLine:
+		return "next"
+	case PrefTwoNextLines:
+		return "two"
+	case PrefFarJump:
+		return "far"
+	case PrefLoop:
+		return "loop"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 // Build returns a new cache unit
 func (b Builder) Build(name string) *Comp {
 	b.assertAllRequiredInformationIsAvailable()
@@ -151,6 +206,7 @@ func (b Builder) Build(name string) *Comp {
 	c := &Comp{
 		log2BlockSize:  b.log2BlockSize,
 		numReqPerCycle: b.numReqPerCycle,
+		totalByteSize:  b.totalByteSize,
 	}
 	c.TickingComponent = sim.NewTickingComponent(
 		name, b.engine, b.freq, c)
@@ -185,7 +241,26 @@ func (b Builder) Build(name string) *Comp {
 	c.bankLatency = b.bankLatency
 	c.wayAssociativity = b.wayAssociativity
 	c.maxNumConcurrentTrans = b.maxNumConcurrentTrans
+	// PREFETCH IMPLEMETATION NURIA
+	if name == "GPU[1].SA[0].L1VCache[0]" {
+		fmt.Printf("\n")
+		fmt.Printf("PREFETCH MODE INITIALIZATION\n")
 
+		c.prefetchMode = parsePrefetchMode(*flagPrefetchMode)
+		fmt.Printf("Flag --prefetch.mode='%s'\n", *flagPrefetchMode)
+		fmt.Printf("Parsed to enum: PrefetchMode=%d\n", c.prefetchMode)
+		fmt.Printf("\n")
+		b.initializePrefetchParameters(c)
+		fmt.Printf("FINAL CONFIGURATION:\n")
+		fmt.Printf("       Mode:    %s (enum=%d)\n", getPrefetchModeString(c.prefetchMode), c.prefetchMode)
+		fmt.Printf("       Stride:  %d bloques\n", c.prefetchStrideBlocks)
+		fmt.Printf("       Lines:   %d líneas\n", c.prefetchNumLines)
+		fmt.Printf("\n")
+		fmt.Printf("INITIALIZATION COMPLETE - START\n")
+	} else {
+		c.prefetchMode = parsePrefetchMode(*flagPrefetchMode)
+		b.initializePrefetchParameters(c)
+	}
 	b.configureAddressMapper(c)
 
 	b.buildStages(c)
@@ -198,6 +273,70 @@ func (b Builder) Build(name string) *Comp {
 	c.AddMiddleware(middleware)
 
 	return c
+}
+
+func (b *Builder) initializePrefetchParameters(c *Comp) {
+	mode := c.prefetchMode
+	blockSize := uint64(1 << c.log2BlockSize)
+	var dataSize uint64 = GlobalDataSize
+	if dataSize == 0 {
+		// Si no se establece, usar el tamaño del caché como default
+		dataSize = c.totalByteSize
+	}
+	dataBlocks := dataSize / blockSize
+	maxSafeStride := dataBlocks - 2
+	maxSafeNumLines := dataBlocks / 2
+
+	switch mode {
+	case PrefNone:
+		c.prefetchStrideBlocks = 0
+		c.prefetchNumLines = 0
+
+	case PrefNextLine:
+		c.prefetchStrideBlocks = 1
+		c.prefetchNumLines = 1
+
+	case PrefTwoNextLines:
+		c.prefetchStrideBlocks = 1
+		c.prefetchNumLines = 2
+
+	case PrefFarJump:
+		stride := *flagFarStride
+		if stride == 0 {
+			stride = maxSafeStride / 10
+		}
+		if stride < 1 {
+			stride = 1
+		}
+
+		// Validar que no exceeda máximo seguro
+		if stride > maxSafeStride {
+			stride = maxSafeStride
+		}
+
+		c.prefetchStrideBlocks = stride
+		c.prefetchNumLines = 1
+
+	case PrefLoop:
+		numLines := *flagNumLines
+
+		if numLines == 0 {
+			numLines = maxSafeNumLines / 10
+		}
+		if numLines < 1 {
+			numLines = 1
+		}
+
+		// Validar que no exceeda máximo seguro
+		if numLines > maxSafeNumLines {
+			numLines = maxSafeNumLines
+		}
+		c.prefetchStrideBlocks = 1
+		c.prefetchNumLines = numLines
+
+	default:
+		log.Fatalf("ERROR: Invalid prefetch mode %d\n", mode)
+	}
 }
 
 func (b *Builder) buildStages(c *Comp) {

@@ -6,6 +6,16 @@ import (
 	"github.com/sarchlab/akita/v4/sim"
 )
 
+// PREFETCH IMPLEMETATION NURIA
+type PrefetchMode int // patron de go para crear enumerados
+const (               // conjunto de constantes de tipo PrefetchMode
+	PrefNone         PrefetchMode = iota //0
+	PrefNextLine                         //1
+	PrefTwoNextLines                     //2
+	PrefFarJump                          //3
+	PrefLoop                             //4
+)
+
 // Comp is a customized L1 cache the for R9nano GPUs.
 type Comp struct {
 	*sim.TickingComponent
@@ -39,6 +49,12 @@ type Comp struct {
 	postCoalesceTransactions []*transaction
 
 	isPaused bool
+
+	// PREFETCH IMPLEMETATION NURIA
+	prefetchMode         PrefetchMode
+	prefetchStrideBlocks uint64 //salto lejano en bloques
+	prefetchNumLines     uint64 // cuántas líneas prefetchear (para loop)
+	totalByteSize        uint64
 }
 
 // SetAddressToPortMapper sets the finder that tells which remote port can serve

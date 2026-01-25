@@ -34,6 +34,7 @@ type ReadReq struct {
 	AccessByteSize     uint64
 	PID                vm.PID
 	CanWaitForCoalesce bool
+	Prefetch           bool
 	Info               interface{}
 }
 
@@ -84,6 +85,7 @@ type ReadReqBuilder struct {
 	address, byteSize  uint64
 	canWaitForCoalesce bool
 	info               interface{}
+	prefetch           bool
 }
 
 // WithSrc sets the source of the request to build.
@@ -122,6 +124,12 @@ func (b ReadReqBuilder) WithByteSize(byteSize uint64) ReadReqBuilder {
 	return b
 }
 
+// WithPrefetch marks the request being built as a prefetch.
+func (b ReadReqBuilder) WithPrefetch() ReadReqBuilder {
+	b.prefetch = true
+	return b
+}
+
 // CanWaitForCoalesce allow the request to build to wait for coalesce.
 func (b ReadReqBuilder) CanWaitForCoalesce() ReadReqBuilder {
 	b.canWaitForCoalesce = true
@@ -141,6 +149,7 @@ func (b ReadReqBuilder) Build() *ReadReq {
 	r.AccessByteSize = b.byteSize
 	r.CanWaitForCoalesce = b.canWaitForCoalesce
 	r.TrafficClass = reflect.TypeOf(ReadReq{}).String()
+	r.Prefetch = b.prefetch
 
 	return r
 }
