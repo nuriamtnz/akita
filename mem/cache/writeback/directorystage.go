@@ -94,17 +94,22 @@ func (ds *directoryStage) Reset() {
 }
 
 // NURIA PREFETCH IMPLEMENTATION
-func (ds *directoryStage) countPrefetchStats(trans *transaction) {
+func (ds *directoryStage) countPrefetchStats(trans *transaction) bool {
 	// Solo cuando es prefetch
 	if trans.read == nil || !trans.read.Prefetch {
-		return
+		return false
 	}
+
+	if trans.prefetchStatsCounted {
+		return trans.prefetchIsRedundant
+	}
+
+	trans.prefetchStatsCounted = true
 
 	pid := trans.read.PID
 	addr := trans.read.Address
 	blockSize := uint64(1 << ds.cache.log2BlockSize)
 	cacheLineID := addr / blockSize * blockSize
-
 	msgId := tracing.MsgIDAtReceiver(trans.read, ds.cache)
 
 	if ds.cache.directory.Lookup(pid, cacheLineID) != nil {
@@ -112,8 +117,10 @@ func (ds *directoryStage) countPrefetchStats(trans *transaction) {
 		tracing.AddTaskStep(
 			msgId,
 			ds.cache,
-			"prefetch-req-hit-L2",
+			"prefetch-req-hit-l2",
 		)
+		trans.prefetchIsRedundant = true
+		return true
 	} else if ds.cache.mshr.Query(pid, cacheLineID) != nil {
 		// Línea en MSHR
 		tracing.AddTaskStep(
@@ -121,6 +128,8 @@ func (ds *directoryStage) countPrefetchStats(trans *transaction) {
 			ds.cache,
 			"prefetch-req-hit-mshr",
 		)
+		trans.prefetchIsRedundant = true
+		return true
 	} else {
 		// Línea ni en L2 ni en MSHR
 		tracing.AddTaskStep(
@@ -128,6 +137,21 @@ func (ds *directoryStage) countPrefetchStats(trans *transaction) {
 			ds.cache,
 			"prefetch-req-miss",
 		)
+		trans.prefetchIsRedundant = false
+		return false
+	}
+}
+
+// PREFECTH IMPLEMENTATION NURIA
+func (ds *directoryStage) removeInflightTransaction(trans *transaction) {
+	for i, t := range ds.cache.inFlightTransactions {
+		if t == trans {
+			ds.cache.inFlightTransactions = append(
+				ds.cache.inFlightTransactions[:i],
+				ds.cache.inFlightTransactions[i+1:]...,
+			)
+			return
+		}
 	}
 }
 
@@ -135,7 +159,27 @@ func (ds *directoryStage) doRead(trans *transaction) bool {
 	cachelineID, _ := getCacheLineID(
 		trans.read.Address, ds.cache.log2BlockSize)
 
-	ds.countPrefetchStats(trans)
+	if ds.countPrefetchStats(trans) {
+		// Prefetch redundante: la línea ya está en L2 o llegando.
+		// Enviar respuesta ligera a L1 para que decremente su contador
+		// de prefetches en vuelo, y después descartar.
+		if !ds.cache.topPort.CanSend() {
+			return false
+		}
+
+		prefetchDone := mem.DataReadyRspBuilder{}.
+			WithSrc(ds.cache.topPort.AsRemote()).
+			WithDst(trans.read.Src).
+			WithRspTo(trans.read.ID).
+			WithData(nil).
+			Build()
+		ds.cache.topPort.Send(prefetchDone)
+
+		ds.buf.Pop()
+		ds.removeInflightTransaction(trans)
+		tracing.TraceReqComplete(trans.read, ds.cache)
+		return true
+	}
 
 	mshrEntry := ds.cache.mshr.Query(trans.read.PID, cachelineID)
 	if mshrEntry != nil {
@@ -166,6 +210,21 @@ func (ds *directoryStage) handleReadMSHRHit(
 		"read-mshr-hit",
 	)
 
+	// Si esta demanda real llega mientras un prefetch está en vuelo,
+	// el MSHR hit fue causado por el prefetcher.
+	// El primer Requests es quien creó la entrada del MSHR.
+	if !trans.read.Prefetch && len(mshrEntry.Requests) > 0 {
+		if firstTrans, ok := mshrEntry.Requests[0].(*transaction); ok {
+			if firstTrans.read != nil && firstTrans.read.Prefetch {
+				tracing.AddTaskStep(
+					tracing.MsgIDAtReceiver(trans.read, ds.cache),
+					ds.cache,
+					"read-mshr-hit-by-prefetch",
+				)
+			}
+		}
+	}
+
 	return true
 }
 
@@ -177,11 +236,14 @@ func (ds *directoryStage) handleReadHit(
 		return false
 	}
 
-	tracing.AddTaskStep(
-		tracing.MsgIDAtReceiver(trans.read, ds.cache),
-		ds.cache,
-		"read-hit",
-	)
+	ok := ds.readFromBank(trans, block)
+	if ok {
+		tracing.AddTaskStep(
+			tracing.MsgIDAtReceiver(trans.read, ds.cache),
+			ds.cache,
+			"read-hit",
+		)
+	}
 
 	// log.Printf("%.10f, %s, dir read hit， %s, %04X, %04X, (%d, %d), %v\n",
 	// 	now, ds.cache.Name(),
@@ -192,8 +254,7 @@ func (ds *directoryStage) handleReadHit(
 	// 	block.SetID, block.WayID,
 	// 	nil,
 	// )
-
-	return ds.readFromBank(trans, block)
+	return ok
 }
 
 func (ds *directoryStage) handleReadMiss(trans *transaction) bool {
@@ -219,9 +280,13 @@ func (ds *directoryStage) handleReadMiss(trans *transaction) bool {
 	// 	nil,
 	// )
 
-	if ds.needEviction(victim) {
+	// if trans.read.Prefetch {
+	// 	fmt.Printf("Es un prefetch")
+	// }
+
+	if ds.needEviction(victim, trans) {
 		ok := ds.evict(trans, victim)
-		if ok {
+		if ok && !trans.read.Prefetch {
 			tracing.AddTaskStep(
 				tracing.MsgIDAtReceiver(trans.read, ds.cache),
 				ds.cache,
@@ -233,7 +298,7 @@ func (ds *directoryStage) handleReadMiss(trans *transaction) bool {
 	}
 
 	ok := ds.fetch(trans, victim)
-	if ok {
+	if ok && !trans.read.Prefetch {
 		tracing.AddTaskStep(
 			tracing.MsgIDAtReceiver(trans.read, ds.cache),
 			ds.cache,
@@ -328,7 +393,7 @@ func (ds *directoryStage) writeFullLineMiss(trans *transaction) bool {
 		return false
 	}
 
-	if ds.needEviction(victim) {
+	if ds.needEviction(victim, trans) {
 		return ds.evict(trans, victim)
 	}
 
@@ -357,7 +422,7 @@ func (ds *directoryStage) writePartialLineMiss(trans *transaction) bool {
 	// 	write.Data,
 	// )
 
-	if ds.needEviction(victim) {
+	if ds.needEviction(victim, trans) {
 		return ds.evict(trans, victim)
 	}
 
@@ -592,6 +657,17 @@ func (ds *directoryStage) isWritingFullLine(write *mem.WriteReq) bool {
 	return true
 }
 
-func (ds *directoryStage) needEviction(victim *cache.Block) bool {
+func (ds *directoryStage) needEviction(victim *cache.Block, trans *transaction) bool {
+	if victim.IsPrefetched {
+		if trans.read != nil {
+			msgId := tracing.MsgIDAtReceiver(trans.read, ds.cache)
+			tracing.AddTaskStep(msgId, ds.cache, "prefetch-evict")
+		} else if trans.write != nil {
+			msgId := tracing.MsgIDAtReceiver(trans.write, ds.cache)
+			tracing.AddTaskStep(msgId, ds.cache, "prefetch-evict")
+		}
+		victim.IsPrefetched = false
+		victim.IsPrefetchedFirstUse = false
+	}
 	return victim.IsValid && victim.IsDirty
 }

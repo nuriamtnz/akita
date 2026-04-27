@@ -55,6 +55,10 @@ type Comp struct {
 	prefetchStrideBlocks uint64 //salto lejano en bloques
 	prefetchNumLines     uint64 // cuántas líneas prefetchear (para loop)
 	totalByteSize        uint64
+
+	// Límite de prefetches en vuelo por caché L1
+	inFlightPrefetches    int
+	maxInFlightPrefetches int
 }
 
 // SetAddressToPortMapper sets the finder that tells which remote port can serve

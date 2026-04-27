@@ -48,6 +48,16 @@ func (p *topParser) Tick() bool {
 
 	tracing.TraceReqReceive(req, p.cache)
 
+	//CONTADORES NURIA
+	if readReq, ok := req.(*mem.ReadReq); ok {
+		msgId := tracing.MsgIDAtReceiver(readReq, p.cache)
+		if readReq.Prefetch {
+			tracing.AddTaskStep(msgId, p.cache, "top-prefetch-read-req")
+		} else {
+			tracing.AddTaskStep(msgId, p.cache, "top-demand-read-req")
+		}
+	}
+
 	p.cache.topPort.RetrieveIncoming()
 
 	return true

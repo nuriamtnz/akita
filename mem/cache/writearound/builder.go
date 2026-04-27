@@ -19,6 +19,8 @@ var (
 	//flag de tipo uint64 llamado "prefetch.farstride" con valor por defecto 1024
 	flagFarStride = flag.Uint64("prefetch.farstride", 0, "stride en bloques para far jump")
 	flagNumLines  = flag.Uint64("prefetch.NumLines", 0, "numero de bloques consecutivos que traer")
+	// Límite máximo de prefetches en vuelo por CU (0 = sin límite)
+	flagMaxInFlightPrefetches = flag.Int("prefetch.maxinflight", 0, "max prefetches en vuelo por L1 cache (0=sin limite)")
 )
 var GlobalDataSize uint64 = 0
 
@@ -255,6 +257,7 @@ func (b Builder) Build(name string) *Comp {
 		fmt.Printf("       Mode:    %s (enum=%d)\n", getPrefetchModeString(c.prefetchMode), c.prefetchMode)
 		fmt.Printf("       Stride:  %d bloques\n", c.prefetchStrideBlocks)
 		fmt.Printf("       Lines:   %d líneas\n", c.prefetchNumLines)
+		fmt.Printf("       MaxInFlight: %d prefetches en vuelo\n", c.maxInFlightPrefetches)
 		fmt.Printf("\n")
 		fmt.Printf("INITIALIZATION COMPLETE - START\n")
 	} else {
@@ -276,16 +279,31 @@ func (b Builder) Build(name string) *Comp {
 }
 
 func (b *Builder) initializePrefetchParameters(c *Comp) {
+	// Configurar límite de prefetches en vuelo
+	c.maxInFlightPrefetches = *flagMaxInFlightPrefetches
+	c.inFlightPrefetches = 0
+
 	mode := c.prefetchMode
 	blockSize := uint64(1 << c.log2BlockSize)
 	var dataSize uint64 = GlobalDataSize
+
 	if dataSize == 0 {
-		// Si no se establece, usar el tamaño del caché como default
 		dataSize = c.totalByteSize
 	}
+
 	dataBlocks := dataSize / blockSize
-	maxSafeStride := dataBlocks - 2
-	maxSafeNumLines := dataBlocks / 2
+	maxSafeStride := uint64(0)
+
+	if dataBlocks > 2 {
+		maxSafeStride = (dataBlocks * 5) / 100
+	}
+
+	if maxSafeStride < 1 {
+		maxSafeStride = 1
+	}
+
+	maxSafeNumLines := uint64(4)
+	//maxPhysicalStride := uint64(256)
 
 	switch mode {
 	case PrefNone:
@@ -293,25 +311,44 @@ func (b *Builder) initializePrefetchParameters(c *Comp) {
 		c.prefetchNumLines = 0
 
 	case PrefNextLine:
-		c.prefetchStrideBlocks = 1
-		c.prefetchNumLines = 1
+		if dataBlocks > 1 {
+			c.prefetchStrideBlocks = 1
+			c.prefetchNumLines = 1
+		} else {
+			c.prefetchStrideBlocks = 0
+			c.prefetchNumLines = 0
+		}
 
 	case PrefTwoNextLines:
-		c.prefetchStrideBlocks = 1
-		c.prefetchNumLines = 2
+		if dataBlocks > 2 {
+			c.prefetchStrideBlocks = 1
+			c.prefetchNumLines = 2
+		} else {
+			c.prefetchStrideBlocks = 0
+			c.prefetchNumLines = 0
+		}
 
 	case PrefFarJump:
 		stride := *flagFarStride
 		if stride == 0 {
-			stride = maxSafeStride / 10
+			// if maxSafeStride > maxPhysicalStride {
+			// 	stride = maxPhysicalStride
+			// } else {
+			// 	stride = maxSafeStride
+			// }
+			stride = maxSafeStride
 		}
 		if stride < 1 {
 			stride = 1
 		}
 
 		// Validar que no exceeda máximo seguro
-		if stride > maxSafeStride {
-			stride = maxSafeStride
+		if stride > dataBlocks {
+			if dataBlocks > 1 {
+				stride = dataBlocks - 1
+			} else {
+				stride = 1
+			}
 		}
 
 		c.prefetchStrideBlocks = stride
@@ -321,18 +358,28 @@ func (b *Builder) initializePrefetchParameters(c *Comp) {
 		numLines := *flagNumLines
 
 		if numLines == 0 {
-			numLines = maxSafeNumLines / 10
+			numLines = maxSafeNumLines
 		}
 		if numLines < 1 {
 			numLines = 1
 		}
 
-		// Validar que no exceeda máximo seguro
 		if numLines > maxSafeNumLines {
 			numLines = maxSafeNumLines
 		}
-		c.prefetchStrideBlocks = 1
-		c.prefetchNumLines = numLines
+
+		// Nunca pedir más líneas de las que tiene el propio dataset
+		if numLines > dataBlocks {
+			numLines = dataBlocks
+		}
+
+		if numLines == 0 {
+			c.prefetchStrideBlocks = 0
+			c.prefetchNumLines = 0
+		} else {
+			c.prefetchStrideBlocks = 1
+			c.prefetchNumLines = numLines
+		}
 
 	default:
 		log.Fatalf("ERROR: Invalid prefetch mode %d\n", mode)

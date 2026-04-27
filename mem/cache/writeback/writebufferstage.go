@@ -366,7 +366,7 @@ func (wb *writeBufferStage) processPrefetchDataReady(
 
 	block := trans.block
 
-	if block != nil && !block.IsPrefetched {
+	if block != nil {
 		block.IsPrefetched = true
 		block.IsPrefetchedFirstUse = true
 

@@ -286,6 +286,8 @@ func (d *directory) fetchFromBottom(
 	victim.PID = pid
 	victim.IsValid = true
 	victim.IsLocked = true
+	victim.IsPrefetched = false
+	victim.IsPrefetchedFirstUse = false
 	d.cache.directory.Visit(victim)
 
 	switch d.cache.prefetchMode {
@@ -301,18 +303,10 @@ func (d *directory) fetchFromBottom(
 		if numLines == 0 {
 			numLines = 1
 		}
-
-		finish := true
 		for i := uint64(1); i <= numLines; i++ {
 			addr := cacheLineID + i*stride*blockSize
-			success := d.trySendPrefetch(pid, addr, blockSize, trans)
-			if !success {
-				finish = false
-				break
-			}
+			d.trySendPrefetch(pid, addr, blockSize, trans)
 		}
-		return finish
-
 	}
 
 	return true
@@ -323,10 +317,19 @@ func (d *directory) trySendPrefetch(pid vm.PID, addr, blockSize uint64, trans *t
 	//VALIDAR que la dirección es válida
 	cacheLineID := addr / blockSize * blockSize
 
+	// Comprobar límite de prefetches en vuelo por CU
+	if d.cache.maxInFlightPrefetches > 0 &&
+		d.cache.inFlightPrefetches >= d.cache.maxInFlightPrefetches {
+		tracing.AddTaskStep(trans.id, d.cache, "pref-abort-inflight-limit")
+		return false
+	}
+
 	if d.cache.directory.Lookup(pid, cacheLineID) != nil {
+		tracing.AddTaskStep(trans.id, d.cache, "pref-abort-l1-hit")
 		return false
 	}
 	if d.cache.mshr.Query(pid, cacheLineID) != nil {
+		tracing.AddTaskStep(trans.id, d.cache, "pref-abort-mshr-hit")
 		return false
 	}
 	dst := d.cache.addressToPortMapper.Find(cacheLineID)
@@ -340,11 +343,14 @@ func (d *directory) trySendPrefetch(pid vm.PID, addr, blockSize uint64, trans *t
 		Build()
 
 	err := d.cache.bottomPort.Send(prefetch)
-	if err == nil {
+	if err != nil {
+		tracing.AddTaskStep(trans.id, d.cache, "pref-abort-port-full")
 		return false
 	}
 
+	d.cache.inFlightPrefetches++
 	tracing.TraceReqInitiate(prefetch, d.cache, trans.id+"_prefetch")
+	tracing.AddTaskStep(trans.id, d.cache, "pref-sent-to-l2")
 	return true
 }
 

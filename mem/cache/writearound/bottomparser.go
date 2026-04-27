@@ -50,6 +50,11 @@ func (p *bottomParser) processDoneRsp(done *mem.WriteDoneRsp) bool {
 func (p *bottomParser) processDataReady(dr *mem.DataReadyRsp) bool {
 	trans := p.findTransactionByReadToBottomID(dr.GetRspTo())
 	if trans == nil {
+		// Respuesta a un prefetch enviado a L2: decrementar contador
+		// de prefetches en vuelo para liberar hueco para nuevos prefetches
+		if p.cache.inFlightPrefetches > 0 {
+			p.cache.inFlightPrefetches--
+		}
 		p.cache.bottomPort.RetrieveIncoming()
 		return true
 	}

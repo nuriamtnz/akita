@@ -44,7 +44,8 @@ type transaction struct {
 	mshrEntry         *cache.MSHREntry
 
 	//PREFETCHING IMPLEMENTATION NURIA
-	//Prefetch bool // Indica si esta transacción es un prefetch
+	prefetchStatsCounted bool
+	prefetchIsRedundant  bool
 }
 
 func (t transaction) accessReq() mem.AccessReq {
